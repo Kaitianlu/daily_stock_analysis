@@ -79,16 +79,24 @@ class AnalyzeCommand(BotCommand):
             # 调用分析服务
             from src.services.task_service import get_task_service
             from src.enums import ReportType
-            
+
             service = get_task_service()
-            
+
+            # 检查线程池容量
+            if service.available_workers <= 0:
+                return BotResponse.markdown_response(
+                    f"⏳ **分析队列繁忙**\n\n"
+                    f"当前所有分析线程正在使用中，请等待当前任务完成后再试。\n\n"
+                    f"提示：若长时间无响应，可能是某个任务卡住了，请联系管理员检查。"
+                )
+
             # 提交异步分析任务
             result = service.submit_analysis(
                 code=code,
                 report_type=ReportType.from_str(report_type),
                 source_message=message
             )
-            
+
             if result.get("success"):
                 task_id = result.get("task_id", "")
                 return BotResponse.markdown_response(
@@ -96,12 +104,13 @@ class AnalyzeCommand(BotCommand):
                     f"• 股票代码: `{code}`\n"
                     f"• 报告类型: {ReportType.from_str(report_type).display_name}\n"
                     f"• 任务 ID: `{task_id[:20]}...`\n\n"
-                    f"分析完成后将自动推送结果。"
+                    f"分析完成后将自动推送结果。\n"
+                    f"如遇异常，错误信息将自动推送至此会话。"
                 )
             else:
                 error = result.get("error", "未知错误")
                 return BotResponse.error_response(f"提交分析任务失败: {error}")
-                
+
         except Exception as e:
             logger.error(f"[AnalyzeCommand] 执行失败: {e}")
             return BotResponse.error_response(f"分析失败: {str(e)[:100]}")

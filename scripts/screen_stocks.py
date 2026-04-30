@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 A股选股筛选器 - 按 lxm-stock-plan.txt 规则匹配
-方案：baostock 获取股票列表 + baostock 逐股K线验证全部4条规则
+方案：baostock 获取股票列表 + baostock 逐股K线验证规则1/3/4
 
 市场范围：沪市主板(600/601/603)、深市主板(000/001)、中小板(002)、创业板(300)
 """
@@ -206,18 +206,18 @@ def check_rule2(df):
 
 
 def check_rule3(df):
-    """规则3: 换手率保持5-6%以上（最近9日至少有7天 >= 5%）"""
+    """规则3: 换手率保持活跃（最近9日至少有3天 > 3%）"""
     if df is None or len(df) < 12:
         return False, {}
 
     turn_col = '换手率'
     recent = df.tail(9)[turn_col]
-    days_above_5 = (recent >= 5.0).sum()
-    return days_above_5 >= 7, {'days_above_5': int(days_above_5), 'avg_turn': round(recent.mean(), 2)}
+    days_above_3 = (recent > 3.0).sum()
+    return days_above_3 >= 3, {'days_above_3': int(days_above_3), 'avg_turn': round(recent.mean(), 2)}
 
 
 def check_rule4(df):
-    """规则4: MA30 > MA60 > MA90 开始进入多头排列"""
+    """规则4: MA30 > MA60 > MA90 多头排列已持续 >= 3天（回溯7天）"""
     if df is None or len(df) < 95:
         return False, {}
 
@@ -232,19 +232,19 @@ def check_rule4(df):
 
     if m30 > m60 > m90:
         was_aligned = 0
-        for offset in range(1, 6):
+        for offset in range(1, 8):  # 回溯7天
             if len(ma30) > offset:
                 p30, p60, p90 = ma30[-1-offset], ma60[-1-offset], ma90[-1-offset]
                 if not (np.isnan(p30) or np.isnan(p60) or np.isnan(p90)):
                     if p30 > p60 > p90:
                         was_aligned += 1
-        recently = was_aligned <= 2
-        return True, {'MA30': round(m30,2), 'MA60': round(m60,2), 'MA90': round(m90,2), 'new': recently}
+        established = was_aligned >= 3  # 至少3天已形成多头排列
+        return True, {'MA30': round(m30,2), 'MA60': round(m60,2), 'MA90': round(m90,2), 'aligned_days': was_aligned + 1, 'established': established}
     return False, {}
 
 
 def phase2_screen(stocks):
-    """逐股拉取K线，验证规则1-4（R1为必要条件，R2/R3/R4为优先级排序）"""
+    """逐股拉取K线，验证规则1/3/4（R1为必要条件，R3/R4为优先级排序）"""
     print("\n" + "=" * 60, flush=True)
     print("Phase 2: K线深筛 (baostock)", flush=True)
     print("=" * 60, flush=True)
@@ -278,26 +278,23 @@ def phase2_screen(stocks):
             time.sleep(0.05)
             continue
 
-        # R1 通过后检查 R2/R3/R4
-        r2_ok, r2_info = check_rule2(df)
+        # R1 通过后检查 R3/R4
         r3_ok, r3_info = check_rule3(df)
         r4_ok, r4_info = check_rule4(df)
 
-        matched = 1 + sum([bool(r2_ok), bool(r3_ok), bool(r4_ok)])  # R1 已通过，总分 1-4
+        matched = 1 + sum([bool(r3_ok), bool(r4_ok)])  # R1 已通过，总分 1-3
 
         tags = [f"R1振幅:{r1_info['close_amp']}%"]
-        if r2_ok: tags.append(f"R2量比:{r2_info['ratio']}x")
-        if r3_ok: tags.append(f"R3换手:{r3_info['avg_turn']}%")
-        if r4_ok: tags.append(f"R4多头{'🆕' if r4_info.get('new') else ''}")
+        if r3_ok: tags.append(f"R3换手>{r3_info['avg_turn']}%")
+        if r4_ok: tags.append(f"R4多头{'已持续' if r4_info.get('established') else ''}")
         status = " | ".join(tags)
 
-        level = "🔥" if matched >= 4 else "⭐" if matched >= 3 else "•" if matched >= 2 else "·"
-        print(f"{prefix:<48} {level} {matched}/4 [{status}]", flush=True)
+        level = "🔥" if matched >= 3 else "⭐" if matched >= 2 else "·"
+        print(f"{prefix:<48} {level} {matched}/3 [{status}]", flush=True)
 
         results.append({
             'code': code, 'name': name,
             'r1_ok': bool(r1_ok), 'r1_info': r1_info,
-            'r2_ok': bool(r2_ok), 'r2_info': r2_info,
             'r3_ok': bool(r3_ok), 'r3_info': r3_info,
             'r4_ok': bool(r4_ok), 'r4_info': r4_info,
             'matched': int(matched),
@@ -311,7 +308,7 @@ def phase2_screen(stocks):
     matched_counts = {}
     for r in results:
         matched_counts[r['matched']] = matched_counts.get(r['matched'], 0) + 1
-    summary = " | ".join([f"{m}/4: {c}只" for m, c in sorted(matched_counts.items(), reverse=True)])
+    summary = " | ".join([f"{m}/3: {c}只" for m, c in sorted(matched_counts.items(), reverse=True)])
     print(f"\n  ✅ Phase 2 完成: {len(results)} 只通过R1 ({summary})", flush=True)
     return results
 
@@ -327,41 +324,34 @@ def print_results(results):
         return
 
     # results 已按 matched 降序排列
-    full = [r for r in results if r['matched'] >= 4]
-    three = [r for r in results if r['matched'] == 3]
+    full = [r for r in results if r['matched'] >= 3]
     two = [r for r in results if r['matched'] == 2]
     one = [r for r in results if r['matched'] == 1]
 
-    print(f"\n  🔥 4/4: {len(full)}只 | ⭐ 3/4: {len(three)}只 | • 2/4: {len(two)}只 | · 1/4(R1): {len(one)}只\n")
+    print(f"\n  🔥 3/3: {len(full)}只 | ⭐ 2/3: {len(two)}只 | · 1/3(R1): {len(one)}只\n")
 
-    for group in [full, three, two, one]:
+    for group in [full, two, one]:
         for r in group:
             print_stock_detail(r)
 
 
 def print_stock_detail(r):
     print(f"\n{'='*55}")
-    print(f"  {r['code']} {r['name']}  [{r['matched']}/4]")
+    print(f"  {r['code']} {r['name']}  [{r['matched']}/3]")
     print(f"{'='*55}")
 
     i = r['r1_info']
     print(f"  ✅ 规则1 [蓄势形态]: 收盘振幅{i['close_amp']}% 实体中位数{i['median_entity']}% 阳{i['bullish']}阴{i['bearish']} (收盘区间{i['min_close']}-{i['max_close']})")
 
-    if r['r2_ok']:
-        i = r['r2_info']
-        print(f"  ✅ 规则2 [底部倍量]: {i['date']} 量比 {i['ratio']}x (当日{i['vol']} vs 20日均{i['avg']})")
-    else:
-        print(f"  ❌ 规则2 [底部倍量]: 不满足")
-
     if r['r3_ok']:
         i = r['r3_info']
-        print(f"  ✅ 规则3 [换手率≥5%]: 近9日{i['days_above_5']}天≥5%, 均值{i['avg_turn']}%")
+        print(f"  ✅ 规则3 [换手率>3%]: 近9日{i['days_above_3']}天>3%, 均值{i['avg_turn']}%")
     else:
-        print(f"  ❌ 规则3 [换手率≥5%]: 不满足")
+        print(f"  ❌ 规则3 [换手率>3%]: 不满足")
 
     if r['r4_ok']:
         i = r['r4_info']
-        flag = "🆕 刚形成" if i['new'] else "已持续"
+        flag = f"已持续{i['aligned_days']}天" if i['established'] else f"仅{i['aligned_days']}天"
         print(f"  ✅ 规则4 [MA多头排列]: MA30({i['MA30']}) > MA60({i['MA60']}) > MA90({i['MA90']}) [{flag}]")
     else:
         print(f"  ❌ 规则4 [MA多头排列]: 不满足")

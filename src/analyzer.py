@@ -620,7 +620,7 @@ class GeminiAnalyzer:
     "hot_topics": "相关热点",
 
     "search_performed": true/false,
-    "data_sources": "数据来源说明"
+    "data_sources": "列出本次分析使用的所有数据来源。行情数据标注提供方（如：行情-腾讯财经），新闻搜索标注搜索来源（如：新闻-新浪财经/36kr/东方财富等）"
 }
 ```
 
@@ -770,7 +770,7 @@ class GeminiAnalyzer:
     "hot_topics": "相关热点",
 
     "search_performed": true/false,
-    "data_sources": "数据来源说明"
+    "data_sources": "列出本次分析使用的所有数据来源。行情数据标注提供方（如：行情-腾讯财经），新闻搜索标注搜索来源（如：新闻-新浪财经/36kr/东方财富等）"
 }
 ```
 
@@ -1531,6 +1531,7 @@ class GeminiAnalyzer:
 | 总市值 | {self._format_amount(rt.get('total_mv'))} | |
 | 流通市值 | {self._format_amount(rt.get('circ_mv'))} | |
 | 60日涨跌幅 | {rt.get('change_60d', 'N/A')}% | 中期表现 |
+| 行情数据来源 | {rt.get('source', 'N/A')} | 实时行情API提供商 |
 """
 
         # 添加财报与分红（价值投资口径）

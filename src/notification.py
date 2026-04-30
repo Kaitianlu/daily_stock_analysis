@@ -609,7 +609,14 @@ class NotificationService(
                 ])
 
                 self._append_market_snapshot(report_lines, result)
-                
+
+                # 数据来源说明（紧贴行情快照，确保可见）
+                if hasattr(result, 'data_sources') and result.data_sources:
+                    report_lines.append(f"*📋 数据来源：{result.data_sources}*")
+                if hasattr(result, 'search_performed') and result.search_performed:
+                    report_lines.append("*🔍 已执行联网搜索*")
+                report_lines.append("")
+
                 # 核心看点
                 if hasattr(result, 'key_points') and result.key_points:
                     report_lines.extend([
@@ -706,12 +713,6 @@ class NotificationService(
                         f"⚠️ **风险提示**：{result.risk_warning}",
                         "",
                     ])
-                
-                # 数据来源说明
-                if hasattr(result, 'search_performed') and result.search_performed:
-                    report_lines.append("*🔍 已执行联网搜索*")
-                if hasattr(result, 'data_sources') and result.data_sources:
-                    report_lines.append(f"*📋 数据来源：{result.data_sources}*")
                 
                 # 错误信息（如果有）
                 if not result.success and result.error_message:

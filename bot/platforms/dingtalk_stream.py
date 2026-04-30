@@ -138,6 +138,7 @@ class DingtalkStreamHandler:
 
             # 获取消息内容
             raw_content = incoming.text.content if incoming.text else ''
+            logger.info(f"[DingTalk Debug] incoming.text={incoming.text}, text.content={incoming.text.content if incoming.text else 'no-text'}")
 
             # 提取命令（去除 @机器人）
             content = self._extract_command(raw_content)
@@ -183,8 +184,12 @@ class DingtalkStreamHandler:
             return None
 
     def _extract_command(self, text: str) -> str:
-        """提取命令内容（去除 @机器人）"""
+        """提取命令内容（去除 @机器人 和代码格式化反引号）"""
         import re
+        text = text.strip()
+        # 去除钉钉代码格式化包裹的反引号
+        text = text.strip('`')
+        # 去除 @机器人
         text = re.sub(r'^@[\S]+\s*', '', text.strip())
         return text.strip()
 

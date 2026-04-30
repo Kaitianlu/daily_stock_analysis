@@ -2797,7 +2797,9 @@ class SearchService:
             fallback_response: Optional[SearchResponse] = None
             best_preferred_response: Optional[SearchResponse] = None
             best_preferred_count = 0
-            for provider in self._providers:
+            primary_response: Optional[SearchResponse] = None
+            primary_idx: int = -1
+            for idx, provider in enumerate(self._providers):
                 if not provider.is_available:
                     continue
 
@@ -2857,8 +2859,10 @@ class SearchService:
                             best_preferred_count = visible_preferred_count
 
                         if visible_preferred_count >= max_results:
-                            self._put_cache(cache_key, limited_response)
-                            return limited_response
+                            # 保存首选结果，继续尝试下一个引擎获取补充新闻源
+                            primary_response = limited_response
+                            primary_idx = idx
+                            break
                     else:
                         logger.info(
                             "%s 搜索成功但结果仍以英文为主，继续尝试下一引擎",
@@ -2876,6 +2880,53 @@ class SearchService:
                             provider.name,
                             response.error_message,
                         )
+
+            # 首选引擎已获取足够结果，尝试从下一个引擎获取补充新闻源
+            if primary_response is not None and primary_idx >= 0:
+                secondary_providers = self._providers[primary_idx + 1:]
+                for provider in secondary_providers:
+                    if not provider.is_available:
+                        continue
+                    try:
+                        secondary_response = provider.search(
+                            query, provider_max_results, days=search_days
+                        )
+                        secondary_filtered = self._filter_news_response(
+                            secondary_response,
+                            search_days=search_days,
+                            max_results=provider_max_results,
+                            log_scope=f"{stock_code}:{provider.name}:secondary",
+                        )
+                        if secondary_filtered.success and secondary_filtered.results:
+                            # 去重合并
+                            seen_urls = {r.url for r in primary_response.results}
+                            new_results = [
+                                r for r in secondary_filtered.results
+                                if r.url not in seen_urls
+                            ][:max_results]
+                            if new_results:
+                                primary_response.results.extend(new_results)
+                                logger.info(
+                                    "%s 补充 %s 条新闻源（去重后）",
+                                    provider.name,
+                                    len(new_results),
+                                )
+                                break
+                            else:
+                                logger.info(
+                                    "%s 搜索成功但结果全部重复，跳过",
+                                    provider.name,
+                                )
+                        else:
+                            logger.info(
+                                "%s 补充搜索无有效结果，跳过",
+                                provider.name,
+                            )
+                    except Exception as e:
+                        logger.warning("%s 补充搜索异常: %s", provider.name, e)
+
+                self._put_cache(cache_key, primary_response)
+                return primary_response
 
             if prefer_chinese:
                 best_to_return = best_preferred_response or fallback_response
@@ -3106,19 +3157,19 @@ class SearchService:
         
         # 轮流使用不同的搜索引擎
         provider_index = 0
-        
+
         for dim in search_dimensions:
             if search_count >= max_searches:
                 break
-            
+
             # 选择搜索引擎（轮流使用）
             available_providers = [p for p in self._providers if p.is_available]
             if not available_providers:
                 break
-            
+
             provider = available_providers[provider_index % len(available_providers)]
             provider_index += 1
-            
+
             logger.info(f"[情报搜索] {dim['desc']}: 使用 {provider.name}")
 
             if isinstance(provider, TavilySearchProvider) and dim.get('tavily_topic'):
@@ -3148,7 +3199,7 @@ class SearchService:
                 )
             results[dim['name']] = filtered_response
             search_count += 1
-            
+
             if response.success:
                 logger.info(
                     "[情报搜索] %s: 原始=%s条, 过滤后=%s条",
@@ -3158,7 +3209,45 @@ class SearchService:
                 )
             else:
                 logger.warning(f"[情报搜索] {dim['desc']}: 搜索失败 - {response.error_message}")
-            
+
+            # 从下一个搜索引擎获取补充新闻源（去重合并）
+            secondary_provider = available_providers[provider_index % len(available_providers)]
+            if secondary_provider.name != provider.name and search_count < max_searches:
+                search_count += 1
+                logger.info(f"[情报搜索] {dim['desc']}: 补充搜索 使用 {secondary_provider.name}")
+                try:
+                    sec_response = secondary_provider.search(
+                        dim['query'],
+                        max_results=provider_max_results,
+                        days=search_days,
+                    )
+                    if dim['strict_freshness']:
+                        sec_filtered = self._filter_news_response(
+                            sec_response,
+                            search_days=search_days,
+                            max_results=target_per_dimension,
+                            log_scope=f"{stock_code}:{secondary_provider.name}:{dim['name']}_sec",
+                        )
+                    else:
+                        sec_filtered = self._normalize_and_limit_response(
+                            sec_response,
+                            max_results=target_per_dimension,
+                        )
+                    if sec_filtered.success and sec_filtered.results:
+                        seen_urls = {r.url for r in filtered_response.results}
+                        new_results = [r for r in sec_filtered.results if r.url not in seen_urls][:target_per_dimension]
+                        if new_results:
+                            filtered_response.results.extend(new_results)
+                            logger.info(
+                                "[情报搜索] %s: %s 补充 %s 条（去重后），合并共 %s 条",
+                                dim['desc'],
+                                secondary_provider.name,
+                                len(new_results),
+                                len(filtered_response.results),
+                            )
+                except Exception as e:
+                    logger.warning(f"[情报搜索] {dim['desc']}: 补充搜索异常 - {e}")
+
             # 短暂延迟避免请求过快
             time.sleep(0.5)
         
@@ -3198,12 +3287,25 @@ class SearchService:
             # 获取维度描述
             dim_desc = dim_labels.get(dim_name, dim_name)
             
-            lines.append(f"\n{dim_desc} (来源: {resp.provider}):")
+            # 收集所有不重复的新闻来源域名
+            sources_set = set()
+            if resp.success and resp.results:
+                for r in resp.results:
+                    if r.source:
+                        sources_set.add(r.source)
+            sources_str = "、".join(sorted(sources_set)[:6]) if sources_set else ""
+
+            header = f"\n{dim_desc} (搜索:{resp.provider}"
+            if sources_str:
+                header += f", 来源: {sources_str}"
+            header += "):"
+            lines.append(header)
             if resp.success and resp.results:
                 # 增加显示条数
                 for i, r in enumerate(resp.results[:4], 1):
                     date_str = f" [{r.published_date}]" if r.published_date else ""
-                    lines.append(f"  {i}. {r.title}{date_str}")
+                    source_tag = f"【{r.source}】" if r.source else ""
+                    lines.append(f"  {i}. {source_tag}{r.title}{date_str}")
                     # 如果摘要太短，可能信息量不足
                     snippet = r.snippet[:150] if len(r.snippet) > 20 else r.snippet
                     lines.append(f"     {snippet}...")

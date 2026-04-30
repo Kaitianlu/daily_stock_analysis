@@ -45,6 +45,12 @@ class TaskService:
         self._max_workers = max_workers
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._tasks_lock = threading.Lock()
+        self._running_count = 0
+
+    @property
+    def available_workers(self) -> int:
+        """可用的 worker 线程数"""
+        return max(0, self._max_workers - self._running_count)
 
     @classmethod
     def get_instance(cls) -> 'TaskService':
@@ -92,7 +98,22 @@ class TaskService:
 
         task_id = f"{code}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
+        # 检查是否有可用 worker
+        if self.available_workers <= 0:
+            queue_depth = sum(1 for t in self._tasks.values() if t.get('status') == 'pending')
+            logger.warning(f"[TaskService] 线程池已满，拒绝提交 {code}（队列深度={queue_depth}）")
+            # 尝试发送错误通知
+            if source_message:
+                self._send_error_notification(source_message, code, "当前分析队列繁忙，请稍后再试。若有任务长时间未完成，可能是卡住了。")
+            return {
+                "success": False,
+                "error": "分析队列繁忙，请稍后再试",
+                "code": code,
+                "task_id": task_id
+            }
+
         # 提交到线程池
+        self._running_count += 1
         self.executor.submit(
             self._run_analysis,
             code,
@@ -103,7 +124,7 @@ class TaskService:
             query_source
         )
 
-        logger.info(f"[TaskService] 已提交股票 {code} 的分析任务, task_id={task_id}, report_type={report_type.value}")
+        logger.info(f"[TaskService] 已提交股票 {code} 的分析任务, task_id={task_id}, report_type={report_type.value}, running={self._running_count}/{self._max_workers}")
 
         return {
             "success": True,
@@ -137,6 +158,21 @@ class TaskService:
         db = get_db()
         records = db.get_analysis_history(code=code, query_id=query_id, days=days, limit=limit)
         return [r.to_dict() for r in records]
+
+    def _send_error_notification(self, source_message: BotMessage, code: str, error_msg: str) -> None:
+        """发送错误通知到触发分析的会话"""
+        try:
+            from src.notification import NotificationService
+            notifier = NotificationService(source_message=source_message)
+            content = (
+                f"❌ **分析失败**\n\n"
+                f"• 股票代码: `{code}`\n"
+                f"• 错误信息: {error_msg}\n\n"
+                f"请稍后重试或检查股票代码是否正确。"
+            )
+            notifier.send_to_context(content)
+        except Exception as e:
+            logger.error(f"[TaskService] 发送错误通知失败: {e}")
 
     def _run_analysis(
         self,
@@ -221,6 +257,8 @@ class TaskService:
                     })
 
                 logger.warning(f"[TaskService] 股票 {code} 分析失败: {fail_message}")
+                if source_message:
+                    self._send_error_notification(source_message, code, fail_message)
                 return {"success": False, "task_id": task_id, "error": fail_message}
 
         except Exception as e:
@@ -234,7 +272,11 @@ class TaskService:
                     "error": error_msg
                 })
 
+            if source_message:
+                self._send_error_notification(source_message, code, f"分析过程异常: {error_msg[:200]}")
             return {"success": False, "task_id": task_id, "error": error_msg}
+        finally:
+            self._running_count = max(0, self._running_count - 1)
 
 
 # ============================================================
